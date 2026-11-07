@@ -80,6 +80,18 @@ void con_hex(const char *label, uint64_t v)
 	con_str(label, buf);
 }
 
+/* Plain text line for the log dump: no label, cut at the panel width. */
+#define LINE_COLS ((FB_W - 2 * MARGIN) / CH_W)
+
+void con_line(const char *s)
+{
+	int col = 0;
+
+	while (*s && *s != '\n' && col < LINE_COLS)
+		put_char(col++, *s++, WHITE);
+	row++;
+}
+
 void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint32_t vb)
 {
 	char buf[9];

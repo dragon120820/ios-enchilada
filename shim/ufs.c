@@ -60,6 +60,17 @@ static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
 static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
 
+/*
+ * sweetlog (xnu 0047) keeps the console in a 4 MiB ring and copies it to the
+ * last 4 MiB + 4 KiB of the root partition: block 0 is a header, the ring
+ * follows. Ring byte n lives at block 1 + n / BLOCK, offset n % BLOCK, so the
+ * whole area is one contiguous read.
+ */
+#define SWEET_LOG_SIZE		(4u << 20)
+#define SWEET_LOG_BLOCKS	(1 + SWEET_LOG_SIZE / BLOCK)
+#define LINE_MAX		64
+static uint8_t logring[SWEET_LOG_BLOCKS * BLOCK] __attribute__((aligned(4096)));
+
 static uint64_t ticks(void)
 {
 	uint64_t t;
@@ -142,6 +153,11 @@ static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
 }
 
+static uint32_t le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
 static uint64_t le64(const uint8_t *p)
 {
 	uint64_t v = 0;
@@ -161,6 +177,89 @@ static const char *fs_type(uint32_t lba)
 	if (sb[56] == 0x53 && sb[57] == 0xef)
 		return "ext4";
 	return "other";
+}
+
+/* Last `want` newline-terminated lines of the ring, oldest first. */
+static void print_tail(const uint8_t *ring, uint32_t rsize, uint64_t total, int want)
+{
+	uint64_t start = total > rsize ? total - rsize : 0;
+	uint64_t p = total;
+	int found = 0;
+
+	/* Walk back to the start of the (want+1)-th line from the end. */
+	while (p > start && found <= want) {
+		if (ring[(p - 1) % rsize] == '\n')
+			found++;
+		p--;
+	}
+	/* If the ring wrapped mid-line, drop the partial line at the front. */
+	if (p > start || found > want) {
+		while (p < total && ring[p % rsize] != '\n')
+			p++;
+		if (p < total)
+			p++;
+	}
+
+	char buf[LINE_MAX + 1];
+	int n = 0;
+	for (; p < total; p++) {
+		char c = (char)ring[p % rsize];
+		if (c == '\n') {
+			buf[n] = 0;
+			con_line(buf);
+			n = 0;
+			continue;
+		}
+		if (n < LINE_MAX)
+			buf[n++] = c;
+	}
+	if (n) {
+		buf[n] = 0;
+		con_line(buf);
+	}
+}
+
+static void dump_sweetlog(uint32_t first, uint32_t nblocks)
+{
+	con_clear(0xff000000);
+	con_str("SWEETLOG", "console ring from the tail of userdata");
+	if (nblocks < SWEET_LOG_BLOCKS) {
+		con_str("SWEETLOG", "partition smaller than the log");
+		return;
+	}
+	uint32_t base = first + nblocks - SWEET_LOG_BLOCKS;
+	con_hex2("SWEETLOG", "first=", first, "blocks=", nblocks);
+	con_hex2("SWEETLOG", "base=", base, "blocks=", SWEET_LOG_BLOCKS);
+
+	for (uint32_t i = 0; i < SWEET_LOG_BLOCKS; i += 8) {
+		uint32_t n = SWEET_LOG_BLOCKS - i < 8 ? SWEET_LOG_BLOCKS - i : 8;
+		if (read_blocks(base + i, n, logring + (uint64_t)i * BLOCK)) {
+			con_str("SWEETLOG", "read error");
+			return;
+		}
+	}
+
+	const uint8_t *h = logring;
+	if (__builtin_strncmp((const char *)h, "SWEETLOG", 8)) {
+		con_str("SWEETLOG", "no header: log never started");
+		char m[9];
+		for (int i = 0; i < 8; i++)
+			m[i] = (h[i] >= 32 && h[i] < 127) ? (char)h[i] : '.';
+		m[8] = 0;
+		con_str("magic", m);
+		return;
+	}
+	uint32_t rsize = le32(h + 12);
+	uint64_t total = le64(h + 16), seq = le64(h + 24);
+	con_hex2("SWEETLOG", "vers=", le32(h + 8), "size=", rsize);
+	con_hex("SWEETLOG total", total);
+	con_hex("SWEETLOG seq", seq);
+	if (rsize != SWEET_LOG_SIZE) {
+		con_str("SWEETLOG", "ring size mismatch");
+		return;
+	}
+	con_str("SWEETLOG", "last lines:");
+	print_tail(logring + BLOCK, rsize, total, 36);
 }
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
@@ -189,6 +288,8 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (!__builtin_strcmp(name, "userdata") || !__builtin_strcmp(name, "cust") ||
 		    !__builtin_strcmp(name, "cache"))
 			con_str(" fs", fs_type((uint32_t)first));
+		if (!__builtin_strcmp(name, "userdata"))
+			dump_sweetlog((uint32_t)first, (uint32_t)(last - first + 1));
 	}
 }
 
