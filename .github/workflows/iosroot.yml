@@ -51,7 +51,9 @@ jobs:
           set -euo pipefail
           # Not in the Ubuntu archive: build from source, with the two fixes
           # this tree needs (missing <cstdint>, cmake_minimum_required too old).
-          git clone --depth 1 https://github.com/sgan81/apfs-fuse.git "$HOME/apfs-fuse"
+          # --recursive: 3rdparty/lzfse and 3rdparty/lzvn are git submodules and
+          # CMake fails at generate time without them.
+          git clone --depth 1 --recursive https://github.com/sgan81/apfs-fuse.git "$HOME/apfs-fuse"
           if ! grep -q '#include <cstdint>' "$HOME/apfs-fuse/ApfsLib/PList.h"; then
             sed -i '1i #include <cstdint>' "$HOME/apfs-fuse/ApfsLib/PList.h"
           fi
