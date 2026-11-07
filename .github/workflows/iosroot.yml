@@ -100,41 +100,24 @@ jobs:
           sha256sum "$RUNNER_TEMP/iosroot.img"
           df -h "$RUNNER_TEMP"
 
-      - name: Apply the SWEET root tweaks and diff them out
+      - name: Apply the SWEET root tweaks
         run: |
           set -euo pipefail
           ws="$GITHUB_WORKSPACE"
-          chmod +x "$ws/tools/mkiosroot.sh"
           # mkiosroot.sh alone produces a stock root: every daemon it cannot
           # start crash-loops, and _PanicOnCrash turns the first one into a
           # panic. tools/sweet-root-tweaks.py is the step that made the v8-v14
           # images reach the home screen (launchd _PanicOnCrasX, no CommCenter,
           # containers, migration stamp, VirtualAudio/StartRecorderServer off,
           # SpringBoard/BKNoWatchdogs, Setup skipped, activation ark).
-          cp "$RUNNER_TEMP/iosroot.img" "$RUNNER_TEMP/iosroot_tweaked.img"
           mkdir -p "$RUNNER_TEMP/mnt"
-          sudo mount -t hfsplus -o loop,force "$RUNNER_TEMP/iosroot_tweaked.img" "$RUNNER_TEMP/mnt"
+          sudo mount -t hfsplus -o loop,force "$RUNNER_TEMP/iosroot.img" "$RUNNER_TEMP/mnt"
           sudo python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/mnt"
           sudo umount "$RUNNER_TEMP/mnt"
-          fsck.hfsplus -f -y "$RUNNER_TEMP/iosroot_tweaked.img" | grep -v 'Illegal name' || true
-          ls -l "$RUNNER_TEMP/iosroot_tweaked.img"
-          # Only the changed blocks: a few MB instead of 12 GiB, and flashing it
-          # over the base leaves the untouched blocks exactly as they are.
-          python3 "$ws/tools/sparsediff.py" "$RUNNER_TEMP/iosroot.img" \
-            "$RUNNER_TEMP/iosroot_tweaked.img" "$RUNNER_TEMP/tweaks.simg"
-          ls -l "$RUNNER_TEMP/tweaks.simg"
-          sha256sum "$RUNNER_TEMP/tweaks.simg" | tee "$RUNNER_TEMP/tweaks.sha256"
+          fsck.hfsplus -f -y "$RUNNER_TEMP/iosroot.img" | grep -v 'Illegal name' || true
+          ls -l "$RUNNER_TEMP/iosroot.img"
+          sha256sum "$RUNNER_TEMP/iosroot.img"
           df -h "$RUNNER_TEMP"
-
-      - name: Upload the tweak diff
-        uses: actions/upload-artifact@v4
-        with:
-          name: iosroot-tweaks
-          path: |
-            ${{ runner.temp }}/tweaks.simg
-            ${{ runner.temp }}/tweaks.sha256
-          if-no-files-found: error
-          compression-level: 0
 
       - name: Make a sparse image for fastboot
         run: |
