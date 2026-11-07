@@ -1,0 +1,61 @@
+name: shim
+
+# Build the freestanding aarch64 shim (shim/*.c) with a Linux cross compiler and
+# upload the raw flat binary. The boot image itself is packed elsewhere; nothing
+# about the XNU kernel or the DTB is needed to compile the shim.
+on:
+  workflow_dispatch:
+    inputs:
+      fb_h:
+        description: "framebuffer rows (2280 = OnePlus 6, 2340 = OnePlus 6T)"
+        required: false
+        default: "2280"
+
+jobs:
+  shim:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the cross compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Build the shim
+        env:
+          FB_H: ${{ inputs.fb_h }}
+        run: |
+          set -euo pipefail
+          cd shim
+          CC=aarch64-linux-gnu-gcc
+          OBJCOPY=aarch64-linux-gnu-objcopy
+          CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DFB_H=${FB_H}"
+          mkdir -p out
+          for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
+            $CC $CFLAGS -c $f -o out/${f%.*}.o
+          done
+          # No relocation pass: only the header's image_size may be absolute.
+          abs=$(aarch64-linux-gnu-readelf -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o | grep -c ABS64 || true)
+          if [ "$abs" != 0 ]; then echo "::error::$abs absolute relocations in C objects"; exit 1; fi
+          $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
+            out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o -o out/shim.elf
+          $OBJCOPY -O binary out/shim.elf out/Image
+          # Pad to _end so .bss and the stacks exist as zeroed bytes: ABL copies
+          # the file and the image runs in place with no relocation.
+          size=$(aarch64-linux-gnu-nm out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
+          truncate -s "$size" out/Image
+          echo "shim Image: $(stat -c%s out/Image) bytes (_end $size)"
+          sha256sum out/Image | tee out/Image.sha256
+          aarch64-linux-gnu-nm out/shim.elf | grep -E ' (_start|_end)$' || true
+
+      - name: Upload the shim
+        uses: actions/upload-artifact@v4
+        with:
+          name: shim-image
+          path: |
+            shim/out/Image
+            shim/out/Image.sha256
+            shim/out/shim.elf
+          if-no-files-found: error
