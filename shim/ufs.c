@@ -69,7 +69,11 @@ static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
 #define SWEET_LOG_SIZE		(4u << 20)
 #define SWEET_LOG_BLOCKS	(1 + SWEET_LOG_SIZE / BLOCK)
 #define LINE_MAX		64
-static uint8_t logring[SWEET_LOG_BLOCKS * BLOCK] __attribute__((aligned(4096)));
+/* Only the tail is shown, so the ring is read a window at a time: a 4 MiB
+ * .bss object would push _sec_stacks out of adr range in start.S. */
+#define LOG_WINDOW_BLOCKS	16
+#define LOG_WINDOW		(LOG_WINDOW_BLOCKS * BLOCK)
+static uint8_t logwin[LOG_WINDOW] __attribute__((aligned(4096)));
 
 static uint64_t ticks(void)
 {
@@ -179,31 +183,46 @@ static const char *fs_type(uint32_t lba)
 	return "other";
 }
 
-/* Last `want` newline-terminated lines of the ring, oldest first. */
-static void print_tail(const uint8_t *ring, uint32_t rsize, uint64_t total, int want)
+/*
+ * Print the tail of the console ring. Only the last few kilobytes matter, and
+ * ring byte n lives in block ring_base + 1 + n/BLOCK at offset n%BLOCK, so one
+ * window read covers the tail unless it straddles the end of the ring.
+ */
+#define TAIL_BYTES	(2 * BLOCK)
+
+static void print_tail(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
 {
-	uint64_t start = total > rsize ? total - rsize : 0;
-	uint64_t p = total;
-	int found = 0;
+	uint64_t from = total > TAIL_BYTES ? total - TAIL_BYTES : 0;
+	uint64_t at = from - from % BLOCK;
+	uint32_t off = (uint32_t)(at % rsize);
+	uint32_t blk = off / BLOCK;
+	uint32_t cnt = TAIL_BYTES / BLOCK;
+	uint32_t have = 0;
 
-	/* Walk back to the start of the (want+1)-th line from the end. */
-	while (p > start && found <= want) {
-		if (ring[(p - 1) % rsize] == '\n')
-			found++;
-		p--;
-	}
-	/* If the ring wrapped mid-line, drop the partial line at the front. */
-	if (p > start || found > want) {
-		while (p < total && ring[p % rsize] != '\n')
-			p++;
-		if (p < total)
-			p++;
+	static uint8_t win[2 * TAIL_BYTES] __attribute__((aligned(4096)));
+
+	/* A tail spanning the end of the ring is read as two pieces. */
+	for (int part = 0; part < 2 && have < TAIL_BYTES; part++) {
+		uint32_t b = part ? 0 : blk;
+		uint32_t n = cnt;
+		if (b + n > SWEET_LOG_BLOCKS - 1)
+			n = SWEET_LOG_BLOCKS - 1 - b;
+		if (!n)
+			break;
+		if (read_blocks(ring_base + 1 + b, n, win + have)) {
+			con_str("SWEETLOG", "read error");
+			return;
+		}
+		have += n * BLOCK;
 	}
 
+	uint64_t skip = from - at;
 	char buf[LINE_MAX + 1];
 	int n = 0;
-	for (; p < total; p++) {
-		char c = (char)ring[p % rsize];
+	uint64_t limit = have < TAIL_BYTES ? have : TAIL_BYTES;
+
+	for (uint64_t i = skip; i < limit; i++) {
+		char c = (char)win[i];
 		if (c == '\n') {
 			buf[n] = 0;
 			con_line(buf);
@@ -222,7 +241,7 @@ static void print_tail(const uint8_t *ring, uint32_t rsize, uint64_t total, int 
 static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 {
 	con_clear(0xff000000);
-	con_str("SWEETLOG", "console ring from the tail of userdata");
+	con_str("SWEETLOG", "console ring at the tail of userdata");
 	if (nblocks < SWEET_LOG_BLOCKS) {
 		con_str("SWEETLOG", "partition smaller than the log");
 		return;
@@ -231,18 +250,13 @@ static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 	con_hex2("SWEETLOG", "first=", first, "blocks=", nblocks);
 	con_hex2("SWEETLOG", "base=", base, "blocks=", SWEET_LOG_BLOCKS);
 
-	for (uint32_t i = 0; i < SWEET_LOG_BLOCKS; i += 8) {
-		uint32_t n = SWEET_LOG_BLOCKS - i < 8 ? SWEET_LOG_BLOCKS - i : 8;
-		if (read_blocks(base + i, n, logring + (uint64_t)i * BLOCK)) {
-			con_str("SWEETLOG", "read error");
-			return;
-		}
+	if (read_blocks(base, 1, logwin)) {
+		con_str("SWEETLOG", "header read error");
+		return;
 	}
-
-	const uint8_t *h = logring;
+	const uint8_t *h = logwin;
 	static const char magic[8] = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' };
 	int ok = 1;
-	/* Hand-rolled: -ffreestanding links no libc here. */
 	for (int i = 0; i < 8; i++)
 		if (h[i] != (uint8_t)magic[i])
 			ok = 0;
@@ -265,7 +279,7 @@ static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 		return;
 	}
 	con_str("SWEETLOG", "last lines:");
-	print_tail(logring + BLOCK, rsize, total, 36);
+	print_tail(base, rsize, total, 36);
 }
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
