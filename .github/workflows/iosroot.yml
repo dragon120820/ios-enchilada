@@ -1,0 +1,126 @@
+name: iosroot
+
+# Build the iOS 16.7.16 (20H392, iPhone10,3) HFS+ root image for the OnePlus 6
+# from Apple's restore image. This is the only step that needs Linux: the IPSW
+# ships raw APFS (read through apfs-fuse) and the output is a case-sensitive
+# journaled HFS+ volume, which the stock WSL2 kernel cannot mount.
+#
+# The image is sliced into <2 GiB parts because a single artifact that big does
+# not download reliably.
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: "IPSW URL (iPhone10,3 / iPhone10,6 iOS 16.7.16)"
+        required: false
+        default: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+      size:
+        description: "root volume size (mkiosroot.sh argument)"
+        required: false
+        default: "12G"
+      part_mib:
+        description: "size of each uploaded part in MiB"
+        required: false
+        default: "1800"
+
+jobs:
+  root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # hfsprogs: mkfs.hfsplus + fsck.hfsplus. The kernel module comes from
+          # linux-modules-extra; hfsplus is a module on this kernel.
+          sudo apt-get install -y -qq hfsprogs rsync android-sdk-libsparse-utils \
+            cmake build-essential pkg-config libfuse3-dev libbz2-dev zlib1g-dev
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe hfsplus
+          grep -c hfsplus /proc/filesystems
+          mkfs.hfsplus -V 2>&1 | head -1
+          unzip -v | head -1
+
+      - name: Build apfs-fuse
+        run: |
+          set -euo pipefail
+          # Not in the Ubuntu archive: build from source, with the two fixes
+          # this tree needs (missing <cstdint>, cmake_minimum_required too old).
+          git clone --depth 1 https://github.com/sgan81/apfs-fuse.git "$HOME/apfs-fuse"
+          if ! grep -q '#include <cstdint>' "$HOME/apfs-fuse/ApfsLib/PList.h"; then
+            sed -i '1i #include <cstdint>' "$HOME/apfs-fuse/ApfsLib/PList.h"
+          fi
+          sed -i 's/cmake_minimum_required(VERSION 3.0)/cmake_minimum_required(VERSION 3.10)/' \
+            "$HOME/apfs-fuse/CMakeLists.txt"
+          cmake -S "$HOME/apfs-fuse" -B "$HOME/apfs-fuse/build" -DCMAKE_BUILD_TYPE=Release
+          make -C "$HOME/apfs-fuse/build" -j"$(nproc)"
+          sudo install -m 0755 "$HOME/apfs-fuse/build/apfs-fuse" /usr/local/bin/apfs-fuse
+          apfs-fuse --help 2>&1 | head -3 || true
+
+      - name: Fetch the IPSW
+        env:
+          IPSW_URL: ${{ inputs.ipsw_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ipsw"
+          curl -L --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/ipsw/restore.ipsw" "$IPSW_URL"
+          ls -l "$RUNNER_TEMP/ipsw/restore.ipsw"
+          df -h "$RUNNER_TEMP"
+          # Only the three images mkiosroot.sh wants (20H392 layout).
+          cd "$RUNNER_TEMP/ipsw"
+          unzip -l restore.ipsw | grep -E '\.dmg' | head -20
+
+      - name: Extract OS, SystemOS and AppOS
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ipsw"
+          # The names are stable for this build; fail loudly if the layout moved.
+          unzip -o -q restore.ipsw '087-86698-044.dmg' '087-86593-047.dmg' '087-86715-047.dmg'
+          ls -l ./*.dmg
+          df -h .
+
+      - name: Build the HFS+ root volume
+        env:
+          SIZE: ${{ inputs.size }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ipsw"
+          chmod +x "$GITHUB_WORKSPACE/tools/mkiosroot.sh"
+          sudo -E "$GITHUB_WORKSPACE/tools/mkiosroot.sh" \
+            087-86698-044.dmg 087-86593-047.dmg 087-86715-047.dmg \
+            "$RUNNER_TEMP/iosroot.img" "$SIZE"
+          ls -l "$RUNNER_TEMP/iosroot.img"
+          sha256sum "$RUNNER_TEMP/iosroot.img"
+          df -h "$RUNNER_TEMP"
+
+      - name: Make a sparse image for fastboot
+        run: |
+          set -euo pipefail
+          img2simg "$RUNNER_TEMP/iosroot.img" "$RUNNER_TEMP/iosroot.simg"
+          ls -l "$RUNNER_TEMP/iosroot.simg"
+          sha256sum "$RUNNER_TEMP/iosroot.simg"
+          df -h "$RUNNER_TEMP"
+
+      - name: Split into downloadable parts
+        env:
+          PART_MIB: ${{ inputs.part_mib }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/parts"
+          cd "$RUNNER_TEMP/parts"
+          split -b "${PART_MIB}MiB" -d -a 3 "$RUNNER_TEMP/iosroot.simg" iosroot.simg.
+          ls -l
+          sha256sum iosroot.simg.* > parts.sha256
+          cat parts.sha256
+          sha256sum "$RUNNER_TEMP/iosroot.simg" >> parts.sha256
+
+      - name: Upload the parts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iosroot-simg
+          path: ${{ runner.temp }}/parts/*
+          if-no-files-found: error
+          compression-level: 0
