@@ -240,7 +240,13 @@ static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 	}
 
 	const uint8_t *h = logring;
-	if (__builtin_strncmp((const char *)h, "SWEETLOG", 8)) {
+	static const char magic[8] = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' };
+	int ok = 1;
+	/* Hand-rolled: -ffreestanding links no libc here. */
+	for (int i = 0; i < 8; i++)
+		if (h[i] != (uint8_t)magic[i])
+			ok = 0;
+	if (!ok) {
 		con_str("SWEETLOG", "no header: log never started");
 		char m[9];
 		for (int i = 0; i < 8; i++)
