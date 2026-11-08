@@ -1,0 +1,7 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  p:
+    runs-on: macos-14
+    steps:
+      - run: uname -a && xcodebuild -version
