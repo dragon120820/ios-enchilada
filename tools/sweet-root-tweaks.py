@@ -188,8 +188,14 @@ def main():
         sys.exit(__doc__)
     root = sys.argv[1]
     launchd(root)
-    throttle(root)
-    disable(root)
+    # v7 bisekt: v3 (which reached the lock screen) had neither throttle nor
+    # disable.  Both are opt-in now so a build can reproduce v3's content on
+    # v7's layout: run 42498166705 reached a 124 KB ring and stopped before
+    # SpringBoard with mobileactivationd disabled and no seeded data ark.
+    if os.environ.get('SWEET_TWEAK_THROTTLE', '0') == '1':
+        throttle(root)
+    if os.environ.get('SWEET_TWEAK_DISABLE', '0') == '1':
+        disable(root)
     containers(root)
     activation(root)
     audio(root)
