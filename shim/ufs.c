@@ -184,57 +184,114 @@ static const char *fs_type(uint32_t lba)
 }
 
 /*
- * Print the tail of the console ring. Only the last few kilobytes matter, and
- * ring byte n lives in block ring_base + 1 + n/BLOCK at offset n%BLOCK, so one
- * window read covers the tail unless it straddles the end of the ring.
+ * The ring keeps the oldest bytes at offset 0 while total < rsize, so the
+ * first lines of the ring are the start of the boot: kernel init, then the
+ * launchd exec lines in the order they happened. Print those verbatim.
  */
-#define TAIL_BYTES	(2 * BLOCK)
+#define HEAD_LINES	16
 
-static void print_tail(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
+static void print_head(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
 {
-	uint64_t from = total > TAIL_BYTES ? total - TAIL_BYTES : 0;
-	uint64_t at = from - from % BLOCK;
-	uint32_t off = (uint32_t)(at % rsize);
-	uint32_t blk = off / BLOCK;
-	uint32_t cnt = TAIL_BYTES / BLOCK;
-	uint32_t have = 0;
-
-	static uint8_t win[2 * TAIL_BYTES] __attribute__((aligned(4096)));
-
-	/* A tail spanning the end of the ring is read as two pieces. */
-	for (int part = 0; part < 2 && have < TAIL_BYTES; part++) {
-		uint32_t b = part ? 0 : blk;
-		uint32_t n = cnt;
-		if (b + n > SWEET_LOG_BLOCKS - 1)
-			n = SWEET_LOG_BLOCKS - 1 - b;
-		if (!n)
-			break;
-		if (read_blocks(ring_base + 1 + b, n, win + have)) {
-			con_str("SWEETLOG", "read error");
-			return;
-		}
-		have += n * BLOCK;
+	uint64_t limit = total < rsize ? total : rsize;
+	uint32_t cnt = LOG_WINDOW_BLOCKS;
+	if ((uint64_t)cnt * BLOCK > limit)
+		cnt = (uint32_t)((limit + BLOCK - 1) / BLOCK);
+	if (!cnt)
+		return;
+	if (cnt > SWEET_LOG_BLOCKS - 1)
+		cnt = SWEET_LOG_BLOCKS - 1;
+	if (read_blocks(ring_base + 1, cnt, logwin)) {
+		con_str("SWEETLOG", "head read error");
+		return;
 	}
+	uint64_t have = (uint64_t)cnt * BLOCK;
+	if (have > limit)
+		have = limit;
 
-	uint64_t skip = from - at;
 	char buf[LINE_MAX + 1];
-	int n = 0;
-	uint64_t limit = have < TAIL_BYTES ? have : TAIL_BYTES;
+	int n = 0, shown = 0;
 
-	for (uint64_t i = skip; i < limit; i++) {
-		char c = (char)win[i];
+	for (uint64_t i = 0; i < have && shown < want; i++) {
+		char c = (char)logwin[i];
 		if (c == '\n') {
 			buf[n] = 0;
 			con_line(buf);
 			n = 0;
+			shown++;
 			continue;
 		}
 		if (n < LINE_MAX)
 			buf[n++] = c;
 	}
-	if (n) {
-		buf[n] = 0;
-		con_line(buf);
+}
+
+/* Does s contain one of the words that explain a failure? */
+static int has_needle(const char *s)
+{
+	static const char *nd[] = { "CRASH", "panic", "Panic", "error", "failed", "ASSERT", 0 };
+
+	for (int k = 0; nd[k]; k++) {
+		for (const char *a = s; *a; a++) {
+			const char *p = a, *b = nd[k];
+			while (*b && *p == *b)
+				p++, b++;
+			if (!*b)
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Walk the whole ring and print only the lines that name a failure. The tail
+ * is all repeats, so this is the only way to see where a daemon first died.
+ */
+#define FILTER_LINES	16
+
+static void print_filter(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
+{
+	uint64_t limit = total < rsize ? total : rsize;
+	char cur[LINE_MAX + 1];
+	int n = 0, shown = 0;
+
+	for (uint64_t at = 0; at < limit && shown < want; ) {
+		uint32_t off = (uint32_t)(at % rsize);
+		uint32_t blk = off / BLOCK;
+		uint32_t cnt = LOG_WINDOW_BLOCKS;
+
+		if (at + (uint64_t)LOG_WINDOW > limit)
+			cnt = (uint32_t)((limit - at + BLOCK - 1) / BLOCK);
+		if (!cnt)
+			break;
+		if (blk + cnt > SWEET_LOG_BLOCKS - 1)
+			cnt = SWEET_LOG_BLOCKS - 1 - blk;
+		if (!cnt)
+			break;
+		if (read_blocks(ring_base + 1 + blk, cnt, logwin)) {
+			con_str("SWEETLOG", "scan read error");
+			return;
+		}
+		uint64_t have = (uint64_t)cnt * BLOCK;
+		if (at + have > limit)
+			have = limit - at;
+		if (!have)
+			break;
+		at += have;	/* counts bytes consumed, so a short read cannot skip */
+
+		for (uint64_t i = 0; i < have && shown < want; i++) {
+			char c = (char)logwin[i];
+			if (c == '\n') {
+				cur[n] = 0;
+				if (n && has_needle(cur)) {
+					con_line(cur);
+					shown++;
+				}
+				n = 0;
+				continue;
+			}
+			if (n < LINE_MAX)
+				cur[n++] = c;
+		}
 	}
 }
 
@@ -278,8 +335,11 @@ static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 		con_str("SWEETLOG", "ring size mismatch");
 		return;
 	}
-	con_str("SWEETLOG", "last lines:");
-	print_tail(base, rsize, total, 36);
+	con_str("SWEETLOG", "first lines:");
+	print_head(base, rsize, total, HEAD_LINES);
+	con_str("SWEETLOG", "lines naming a failure:");
+	print_filter(base, rsize, total, FILTER_LINES);
+	con_str("SWEETLOG", "done");
 }
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
