@@ -1,7 +1,11 @@
 name: probe
 on: workflow_dispatch
 jobs:
-  p:
+  u:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: uname -a
+  m:
     runs-on: macos-14
     steps:
-      - run: uname -a && xcodebuild -version
+      - run: uname -a
