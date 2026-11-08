@@ -246,7 +246,11 @@ static int contains(const char *s, const char *needle)
 static int has_needle(const char *s)
 {
 	return contains(s, "CRASH") || contains(s, "panic") || contains(s, "error")
-		|| contains(s, "failed") || contains(s, "ASSERT");
+		|| contains(s, "failed") || contains(s, "ASSERT")
+		/* the touch geometry line is not a failure, but it is the one
+		 * print that says whether the panel measured for the edge test
+		 * is the panel on this phone. */
+		|| contains(s, "SWEET HID: panel");
 }
 
 /*
