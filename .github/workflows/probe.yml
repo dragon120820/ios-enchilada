@@ -1,11 +1,15 @@
 name: probe
 on: workflow_dispatch
 jobs:
-  u:
-    runs-on: ubuntu-24.04
+  m13:
+    runs-on: macos-13
     steps:
       - run: uname -a
-  m:
-    runs-on: macos-14
+  m15:
+    runs-on: macos-15
+    steps:
+      - run: uname -a
+  m26:
+    runs-on: macos-26
     steps:
       - run: uname -a
