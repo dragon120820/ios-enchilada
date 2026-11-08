@@ -71,6 +71,36 @@ def launchd(root):
     print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
 
 
+# Daemons that crash-loop on a bring-up kernel because a facility is missing:
+# PosterBoard wants a Metal device, financed/healthdappd/driverkitd/rtcreportingd
+# fault inside the same libSystem path, fairplayd.H2 and bluetoothd need SE and
+# a UART respectively. None of them is needed to reach the home screen, and each
+# relaunch burns CPU that the CPU-only renderer needs. Throttle them instead of
+# removing them, so a later stage can simply drop the interval.
+THROTTLE = ('PosterBoard', 'financed', 'healthdappd', 'driverkitd',
+            'rtcreportingd', 'fairplayd', 'bluetoothd', 'symptomd', 'logd')
+
+
+def throttle(root, interval=120):
+    """Raise ThrottleInterval on the crash-looping jobs (idempotent)."""
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    plist = load(path)
+    hit = 0
+    for job in plist['LaunchDaemons'].values():
+        label = job.get('Label', '')
+        if not any(name.lower() in label.lower() for name in THROTTLE):
+            continue
+        if job.get('ThrottleInterval') == interval:
+            continue
+        job['ThrottleInterval'] = interval
+        hit += 1
+        print('throttle', label, interval)
+    if hit:
+        save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+    print(f'launchd.plist: {hit} jobs throttled to {interval}s')
+
+
 def containers(root):
     base = os.path.join(root, 'private/var/containers')
     for sub, uid in (('Bundle', 33), ('Data/System', 0), ('Shared/SystemGroup', 0), ('Temp', 0)):
@@ -127,6 +157,7 @@ def main():
         sys.exit(__doc__)
     root = sys.argv[1]
     launchd(root)
+    throttle(root)
     containers(root)
     activation(root)
     audio(root)
