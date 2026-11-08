@@ -225,21 +225,28 @@ static void print_head(uint32_t ring_base, uint32_t rsize, uint64_t total, int w
 	}
 }
 
-/* Does s contain one of the words that explain a failure? */
-static int has_needle(const char *s)
+/*
+ * Does s contain needle? A static array of string pointers is the one thing
+ * this object cannot have: -fno-pic emits an ABS64 relocation for each element
+ * and the CI check fails. Call the search with literal arguments instead, so
+ * every address is PC-relative.
+ */
+static int contains(const char *s, const char *needle)
 {
-	static const char *nd[] = { "CRASH", "panic", "Panic", "error", "failed", "ASSERT", 0 };
-
-	for (int k = 0; nd[k]; k++) {
-		for (const char *a = s; *a; a++) {
-			const char *p = a, *b = nd[k];
-			while (*b && *p == *b)
-				p++, b++;
-			if (!*b)
-				return 1;
-		}
+	for (const char *a = s; *a; a++) {
+		const char *p = a, *b = needle;
+		while (*b && *p == *b)
+			p++, b++;
+		if (!*b)
+			return 1;
 	}
 	return 0;
+}
+
+static int has_needle(const char *s)
+{
+	return contains(s, "CRASH") || contains(s, "panic") || contains(s, "error")
+		|| contains(s, "failed") || contains(s, "ASSERT");
 }
 
 /*
