@@ -347,7 +347,7 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 	recent_print();
 }
 
-static void dump_sweetlog(uint32_t first, uint32_t nblocks)static void dump_sweetlog(uint32_t first, uint32_t nblocks)
+static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 {
 	con_clear(0xff000000);
 	con_str("SWEETLOG", "console ring at the tail of userdata");
