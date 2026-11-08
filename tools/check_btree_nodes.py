@@ -11,6 +11,15 @@ That is exactly what the v5 root image did on 2026-11-08: its catalog fork was
 162,140,160 bytes = 19,792.5 nodes of 8,192.  Linux mounts such a volume without
 complaint, so this check is the only thing between the build and the device.
 
+It also refuses a tree with no room left.  The v6 image had a catalog that was
+whole and mounted, but 19,712 nodes with only 14 free; on the device the first
+allocation that had to grow the tree failed with
+
+    hfs_clonefile: cluster_write failed - 34
+
+and userland never finished starting.  A tree needs free nodes to grow, so the
+build now requires a margin.
+
     check_btree_nodes.py IMAGE      (raw HFS+ or Android sparse image)
 """
 
@@ -25,6 +34,11 @@ VOLUME_HEADER_OFFSET = 1024
 FORK_DESCRIPTOR_BASE = 112
 FORK_DESCRIPTOR_SIZE = 80
 BTREE_FORKS = ((1, "extents"), (2, "catalog"), (3, "attributes"))
+
+# A B-tree needs free nodes to grow.  The v6 image shipped a catalog with 14 free
+# nodes out of 19,712 and the device could not extend it, so require a margin.
+MIN_FREE_NODES = 256
+MIN_FREE_FRACTION = 0.02
 
 
 class Raw:
@@ -120,8 +134,10 @@ def main(argv):
         total_nodes = struct.unpack(">I", node[36:40])[0]
         free_nodes = struct.unpack(">I", node[40:44])[0]
         aligned = node_size > 0 and logical % node_size == 0
+        want_free = max(MIN_FREE_NODES, int(total_nodes * MIN_FREE_FRACTION))
+        roomy = free_nodes >= want_free
         print(
-            "%-10s logical %#x nodeSize %d nodes %d free %d depth %d %s"
+            "%-10s logical %#x nodeSize %d nodes %d free %d depth %d %s %s"
             % (
                 name,
                 logical,
@@ -130,13 +146,14 @@ def main(argv):
                 free_nodes,
                 depth,
                 "ALIGNED" if aligned else "MISALIGNED",
+                "ROOMY" if roomy else "FULL(want %d)" % want_free,
             )
         )
-        ok = ok and aligned
+        ok = ok and aligned and roomy
 
     if not ok:
         return 1
-    print("all B-tree forks are whole numbers of nodes")
+    print("all B-tree forks are whole numbers of nodes, with free nodes to grow")
     return 0
 
 

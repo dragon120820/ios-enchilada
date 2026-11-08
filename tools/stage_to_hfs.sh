@@ -11,6 +11,10 @@
 # the catalog B-tree (treeDepth 4 -> 3, rootNode 19668 -> 283, freeNodes 1393 ->
 # 90) and the device then failed to mount it: v4 returned EIO from cat_idlookup,
 # v5 panicked in hfs_btreeio.c:543 with "eof 0x5a1000 not a multiple of 0x2000".
+#
+# The volume is formatted with an oversized catalog clump (-c c=4096) so the
+# B-tree keeps free nodes after the copy: a full tree makes userland fail with
+# "hfs_clonefile: cluster_write failed - 34" instead of reaching the lock screen.
 set -euo pipefail
 
 [[ $# -ge 2 ]] || { sed -n '2,10p' "$0"; exit 2; }
@@ -28,7 +32,14 @@ cleanup() {
 trap cleanup EXIT
 
 truncate -s "$size" "$out"
-mkfs.hfsplus -s -J -v iOSRoot "$out"
+# A catalogue that fits exactly cannot grow.  HFS+ grows a B-tree by allocating a
+# whole clump, so a large clump leaves free nodes behind after every growth.  The
+# v6 image was formatted with the default clump and ended up with 19,712 catalog
+# nodes of which 14 were free; on the device the first allocation that had to grow
+# the tree failed with "hfs_clonefile: cluster_write failed - 34" and userland
+# never finished starting.  -c c=4096 allocates 16 MiB (2048 nodes of 8 KiB) at a
+# time for the catalog, which keeps hundreds of nodes free.
+mkfs.hfsplus -s -J -c c=4096,e=256 -v iOSRoot "$out"
 sudo mount -t hfsplus -o loop,force "$out" "$mount_point"
 echo "copying $staged -> volume (single pass, rsync -aH)"
 sudo rsync -aH --numeric-ids "$staged/" "$mount_point/"
@@ -72,7 +83,7 @@ PYVERIFY
 sudo umount "$verify"
 rmdir "$verify" 2>/dev/null || true
 
-# The catalog B-tree file length must be a whole number of nodes, or XNU panics.
+# The catalog B-tree must be a whole number of nodes and must have room to grow.
 python3 "$(dirname "$0")/check_btree_nodes.py" "$out"
 ls -l "$out"
 sha256sum "$out"

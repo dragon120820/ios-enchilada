@@ -73,7 +73,7 @@ if [[ -n $staging ]]; then
 	mounts=("$link" "${mounts[@]}")
 else
 	truncate -s "$size" "$out"
-	mkfs.hfsplus -s -J -v iOSRoot "$out"
+	mkfs.hfsplus -s -J -c c=4096,e=256 -v iOSRoot "$out"
 	mkdir "$work/root"
 	sudo mount -t hfsplus -o loop,force "$out" "$work/root"
 	mounts=("$work/root" "${mounts[@]}")
