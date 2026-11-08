@@ -250,18 +250,59 @@ static int has_needle(const char *s)
 }
 
 /*
- * Walk the whole ring and print only the lines that name a failure. The tail
- * is all repeats, so this is the only way to see where a daemon first died.
+ * Walk the whole ring and keep the LAST lines that name a failure. The first
+ * ones are boot-time noise; what matters is what was still crashing when the
+ * UI stopped moving, and that is at the end of the ring.
+ *
+ * The history is a fixed array of char rows, not an array of pointers: under
+ * -fno-pic a pointer array emits an ABS64 relocation per element and the CI
+ * guard rejects the object.
  */
-#define FILTER_LINES	16
+#define FILTER_LINES	24
+#define FILTER_COLS	(LINE_MAX + 1)
 
-static void print_filter(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
+static char recent[FILTER_LINES][FILTER_COLS];
+static int recent_at, recent_n;
+
+static void recent_reset(void)
+{
+	recent_at = 0;
+	recent_n = 0;
+}
+
+static void recent_add(const char *s)
+{
+	char *row = recent[recent_at];
+	int i = 0;
+
+	while (s[i] && i < LINE_MAX) {
+		row[i] = s[i];
+		i++;
+	}
+	row[i] = 0;
+	recent_at = (recent_at + 1) % FILTER_LINES;
+	if (recent_n < FILTER_LINES)
+		recent_n++;
+}
+
+static void recent_print(void)
+{
+	for (int k = 0; k < recent_n; k++) {
+		int idx = (recent_at - recent_n + k + FILTER_LINES * 2) % FILTER_LINES;
+		con_line(recent[idx]);
+	}
+}
+
+static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t total)
 {
 	uint64_t limit = total < rsize ? total : rsize;
-	char cur[LINE_MAX + 1];
-	int n = 0, shown = 0;
+	char cur[FILTER_COLS];
+	int n = 0;
+	int matched = 0;
 
-	for (uint64_t at = 0; at < limit && shown < want; ) {
+	recent_reset();
+
+	for (uint64_t at = 0; at < limit; ) {
 		uint32_t off = (uint32_t)(at % rsize);
 		uint32_t blk = off / BLOCK;
 		uint32_t cnt = LOG_WINDOW_BLOCKS;
@@ -283,15 +324,14 @@ static void print_filter(uint32_t ring_base, uint32_t rsize, uint64_t total, int
 			have = limit - at;
 		if (!have)
 			break;
-		at += have;	/* counts bytes consumed, so a short read cannot skip */
 
-		for (uint64_t i = 0; i < have && shown < want; i++) {
+		for (uint64_t i = 0; i < have; i++) {
 			char c = (char)logwin[i];
 			if (c == '\n') {
 				cur[n] = 0;
 				if (n && has_needle(cur)) {
-					con_line(cur);
-					shown++;
+					recent_add(cur);
+					matched++;
 				}
 				n = 0;
 				continue;
@@ -299,10 +339,15 @@ static void print_filter(uint32_t ring_base, uint32_t rsize, uint64_t total, int
 			if (n < LINE_MAX)
 				cur[n++] = c;
 		}
+		at += have;
 	}
+
+	con_hex("SWEETLOG matched", (uint64_t)matched);
+	con_str("SWEETLOG", "last lines that name a failure:");
+	recent_print();
 }
 
-static void dump_sweetlog(uint32_t first, uint32_t nblocks)
+static void dump_sweetlog(uint32_t first, uint32_t nblocks)static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 {
 	con_clear(0xff000000);
 	con_str("SWEETLOG", "console ring at the tail of userdata");
@@ -344,8 +389,7 @@ static void dump_sweetlog(uint32_t first, uint32_t nblocks)
 	}
 	con_str("SWEETLOG", "first lines:");
 	print_head(base, rsize, total, HEAD_LINES);
-	con_str("SWEETLOG", "lines naming a failure:");
-	print_filter(base, rsize, total, FILTER_LINES);
+	print_recent_failures(base, rsize, total);
 	con_str("SWEETLOG", "done");
 }
 
