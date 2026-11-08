@@ -78,7 +78,17 @@ def launchd(root):
 # relaunch burns CPU that the CPU-only renderer needs. Throttle them instead of
 # removing them, so a later stage can simply drop the interval.
 THROTTLE = ('PosterBoard', 'financed', 'healthdappd', 'driverkitd',
-            'rtcreportingd', 'fairplayd', 'bluetoothd', 'symptomd', 'logd')
+            'rtcreportingd', 'fairplayd', 'bluetoothd', 'symptomd', 'logd',
+            'calaccessd', 'chronod', 'cloudd', 'ScreenTimeAgent',
+            'mobileactivation', 'ReportCrash')
+
+# Throttling only slows a crash loop down; while it runs, launchd keeps
+# respawning the job and nothing else gets the CPU the software renderer
+# needs. These ones are not needed to draw the lock screen or the home
+# screen, so they are switched off outright. Delete a label from this
+# list to bring the job back once its missing kernel feature exists.
+DISABLE = ('calaccessd', 'chronod', 'cloudd', 'ScreenTimeAgent',
+           'mobileactivation')
 
 
 def throttle(root, interval=120):
@@ -99,6 +109,27 @@ def throttle(root, interval=120):
     if hit:
         save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
     print(f'launchd.plist: {hit} jobs throttled to {interval}s')
+
+
+def disable(root):
+    """Switch the crash-looping jobs off entirely (idempotent)."""
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    plist = load(path)
+    hit = 0
+    for name, job in plist['LaunchDaemons'].items():
+        label = job.get('Label', name)
+        if not any(sel.lower() in label.lower() for sel in DISABLE):
+            continue
+        if job.get('Disabled') is True and job.get('RunAtLoad') is False:
+            continue
+        job['Disabled'] = True
+        job['RunAtLoad'] = False
+        hit += 1
+        print('disable', label)
+    if hit:
+        save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+    print(f'launchd.plist: {hit} jobs disabled')
 
 
 def containers(root):
@@ -158,6 +189,7 @@ def main():
     root = sys.argv[1]
     launchd(root)
     throttle(root)
+    disable(root)
     containers(root)
     activation(root)
     audio(root)
