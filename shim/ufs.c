@@ -274,6 +274,12 @@ static int recent_at, recent_n;
 static char hid_panel_line[FILTER_COLS];
 static int have_hid_panel;
 
+/* Every line, not only the failures: when the screen goes black the
+ * interesting question is what the OS was doing when it stopped, and
+ * that is usually not an error. */
+static char tail_lines[FILTER_LINES][FILTER_COLS];
+static int tail_at, tail_n;
+
 static void recent_reset(void)
 {
 	recent_at = 0;
@@ -339,6 +345,18 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 			char c = (char)logwin[i];
 			if (c == '\n') {
 				cur[n] = 0;
+				if (n) {
+					char *row = tail_lines[tail_at];
+					int k = 0;
+					while (k < n && k < LINE_MAX) {
+						row[k] = cur[k];
+						k++;
+					}
+					row[k] = 0;
+					tail_at = (tail_at + 1) % FILTER_LINES;
+					if (tail_n < FILTER_LINES)
+						tail_n++;
+				}
 				if (n && !have_hid_panel && contains(cur, "SWEET HID: panel")) {
 					int k = 0;
 					if (n >= LINE_MAX)
@@ -370,6 +388,11 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 		con_str("SWEETLOG", "no SWEET HID: panel line in the ring");
 	con_str("SWEETLOG", "last lines that name a failure:");
 	recent_print();
+	con_str("SWEETLOG", "last lines written, no filter:");
+	for (int k = 0; k < tail_n; k++) {
+		int idx = (tail_at - tail_n + k + FILTER_LINES * 2) % FILTER_LINES;
+		con_line(tail_lines[idx]);
+	}
 }
 
 static void dump_sweetlog(uint32_t first, uint32_t nblocks)
