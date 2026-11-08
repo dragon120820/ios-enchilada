@@ -397,8 +397,8 @@ void shim_main(uint64_t dtb)
 	test_ufs();
 	con_skip();
 	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
-	delay_ms(180000);
+	con_str("UFS", "probe done, holding for 30 min so the panel can be read");
+	delay_ms(1800000);
 	reset(20);
 
 	stage = "fill off";
