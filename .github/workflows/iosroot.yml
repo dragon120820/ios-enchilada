@@ -114,7 +114,8 @@ jobs:
           # images reach the home screen (launchd _PanicOnCrasX, no CommCenter,
           # containers, migration stamp, VirtualAudio/StartRecorderServer off,
           # SpringBoard/BKNoWatchdogs, Setup skipped, activation ark).
-          sudo python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/root"
+          sudo SWEET_TWEAK_THROTTLE=0 SWEET_TWEAK_DISABLE=0 \
+            python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/root"
           sudo python3 - "$RUNNER_TEMP/root" <<'PYSTAGE'
           import plistlib, sys
           root = sys.argv[1]
