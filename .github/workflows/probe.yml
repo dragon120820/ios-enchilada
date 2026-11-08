@@ -1,15 +1,11 @@
 name: probe
 on: workflow_dispatch
 jobs:
-  m13:
-    runs-on: macos-13
-    steps:
-      - run: uname -a
   m15:
     runs-on: macos-15
     steps:
-      - run: uname -a
+      - run: xcodebuild -version; ls /Applications | grep -i xcode; xcrun --find iig 2>&1 | head -2
   m26:
     runs-on: macos-26
     steps:
-      - run: uname -a
+      - run: xcodebuild -version; ls /Applications | grep -i xcode; xcrun --find iig 2>&1 | head -2
