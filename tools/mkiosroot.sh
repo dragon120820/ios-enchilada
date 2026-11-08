@@ -68,6 +68,7 @@ if [[ -n $staging ]]; then
 	# so the driver never has to rewrite the catalog B-tree.
 	mkdir -p "$staging"
 	link="$work/root"
+	mkdir "$link"
 	sudo mount --bind "$staging" "$link"
 	mounts=("$link" "${mounts[@]}")
 else
