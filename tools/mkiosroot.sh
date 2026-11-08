@@ -18,6 +18,13 @@
 # keybagd reads with /defaults/no-effaceable-storage (tools/mkadt.py).
 set -euo pipefail
 
+# Optional first argument: --staging DIR builds the tree in DIR and never
+# modifies a mounted HFS+ volume.  See tools/patch_mkiosroot_staged.py.
+staging=
+if [[ ${1:-} == --staging ]]; then
+	staging=$2
+	shift 2
+fi
 [[ $# -ge 4 ]] || { sed -n '2,12p' "$0"; exit 2; }
 os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3") out=$4 size=${5:-16G}
 [[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
@@ -56,11 +63,20 @@ apfs_mount "$os" os
 apfs_mount "$sysos" sysos
 apfs_mount "$appos" appos
 
-truncate -s "$size" "$out"
-mkfs.hfsplus -s -J -v iOSRoot "$out"
-mkdir "$work/root"
-sudo mount -t hfsplus -o loop,force "$out" "$work/root"
-mounts=("$work/root" "${mounts[@]}")
+if [[ -n $staging ]]; then
+	# Build the tree on ext4.  The HFS+ image is then written once, in order,
+	# so the driver never has to rewrite the catalog B-tree.
+	mkdir -p "$staging"
+	link="$work/root"
+	sudo mount --bind "$staging" "$link"
+	mounts=("$link" "${mounts[@]}")
+else
+	truncate -s "$size" "$out"
+	mkfs.hfsplus -s -J -v iOSRoot "$out"
+	mkdir "$work/root"
+	sudo mount -t hfsplus -o loop,force "$out" "$work/root"
+	mounts=("$work/root" "${mounts[@]}")
+fi
 
 copy() {
 	echo "copying $1 -> ${2#"$work/root"}"
@@ -124,6 +140,13 @@ sudo chmod 0600 "$work/root/private/var/keybags/systembag.kb"
 
 df -h "$work/root"
 sudo umount "$work/root"
+if [[ -n $staging ]]; then
+	echo "staged tree in $staging: no HFS+ volume was written"
+	if [[ -z ${staging_keep_image:-} ]]; then
+		rm -f "$out"
+	fi
+	exit 0
+fi
 # Linux hfsplus decomposes some non-ASCII names (localized Shortcuts examples)
 # differently from Apple's tables; let fsck_hfs rewrite them, then verify.
 fsck.hfsplus -f -y "$out" | grep -v 'Illegal name' || true

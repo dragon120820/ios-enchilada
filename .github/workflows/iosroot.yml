@@ -86,21 +86,25 @@ jobs:
           ls -l ./*.dmg
           df -h .
 
-      - name: Build the HFS+ root volume
+      - name: Build the root tree on ext4
         env:
           SIZE: ${{ inputs.size }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ipsw"
           chmod +x "$GITHUB_WORKSPACE/tools/mkiosroot.sh"
-          sudo -E "$GITHUB_WORKSPACE/tools/mkiosroot.sh" \
+          # --staging builds the tree and never creates or mounts the HFS+ image.
+          # Editing a read-write HFS+ mount makes the Linux driver rebuild the
+          # catalog B-tree, and the device then fails to mount it (v4: EIO from
+          # cat_idlookup; v5: panic in hfs_btreeio.c:543).  See
+          # tools/patch_mkiosroot_staged.py for the measurements.
+          sudo -E "$GITHUB_WORKSPACE/tools/mkiosroot.sh" --staging "$RUNNER_TEMP/root" \
             087-86698-044.dmg 087-86593-047.dmg 087-86715-047.dmg \
-            "$RUNNER_TEMP/iosroot.img" "$SIZE"
-          ls -l "$RUNNER_TEMP/iosroot.img"
-          sha256sum "$RUNNER_TEMP/iosroot.img"
+            "$RUNNER_TEMP/unused.img" "$SIZE"
+          sudo du -sh "$RUNNER_TEMP/root"
           df -h "$RUNNER_TEMP"
 
-      - name: Apply the SWEET root tweaks
+      - name: Apply the SWEET root tweaks to the tree
         run: |
           set -euo pipefail
           ws="$GITHUB_WORKSPACE"
@@ -110,27 +114,8 @@ jobs:
           # images reach the home screen (launchd _PanicOnCrasX, no CommCenter,
           # containers, migration stamp, VirtualAudio/StartRecorderServer off,
           # SpringBoard/BKNoWatchdogs, Setup skipped, activation ark).
-          mkdir -p "$RUNNER_TEMP/mnt"
-          sudo mount -t hfsplus -o loop,force "$RUNNER_TEMP/iosroot.img" "$RUNNER_TEMP/mnt"
-          sudo python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/mnt"
-          sync
-          sudo umount "$RUNNER_TEMP/mnt"
-
-          # Read-only inspection.  "fsck -y" rewrites the catalog B-tree header
-          # whenever it finds anything, and a rewritten header whose rootNode
-          # points at an empty node makes XNU's cat_idlookup return EIO, which
-          # shows up on the device as "cannot mount root, errno = 19".
-          fsck.hfsplus -f -n "$RUNNER_TEMP/iosroot.img" | grep -v 'Illegal name' || true
-
-          # The volume has to mount and read before it is published: the checks
-          # above pass on a broken catalog B-tree, and that only fails on the
-          # device, eleven minutes into a flash.
-          mkdir -p "$RUNNER_TEMP/verify"
-          sudo mount -t hfsplus -o loop,ro,force "$RUNNER_TEMP/iosroot.img" "$RUNNER_TEMP/verify"
-          sudo ls -l "$RUNNER_TEMP/verify" | head -30
-          sudo test -f "$RUNNER_TEMP/verify/System/Library/CoreServices/SystemVersion.plist"
-          sudo test -f "$RUNNER_TEMP/verify/System/Library/xpc/launchd.plist"
-          sudo python3 - "$RUNNER_TEMP/verify" <<'PYVERIFY'
+          sudo python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/root"
+          sudo python3 - "$RUNNER_TEMP/root" <<'PYSTAGE'
           import plistlib, sys
           root = sys.argv[1]
           with open(root + '/System/Library/CoreServices/SystemVersion.plist', 'rb') as f:
@@ -142,13 +127,21 @@ jobs:
           off = sorted(n for n, j in jobs.items() if j.get('Disabled'))
           print('jobs:', len(jobs), 'disabled:', len(off))
           print('disabled list:', ' '.join(off))
-          PYVERIFY
-          sudo umount "$RUNNER_TEMP/verify"
+          PYSTAGE
 
-          ls -l "$RUNNER_TEMP/iosroot.img"
-          sha256sum "$RUNNER_TEMP/iosroot.img"
+      - name: Write the tree into a fresh HFS+ image
+        env:
+          SIZE: ${{ inputs.size }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          chmod +x "$GITHUB_WORKSPACE/tools/stage_to_hfs.sh"
+          # One rsync pass into a freshly formatted journaled volume, then a
+          # read-only fsck and a read-back mount, then the node-alignment check
+          # that XNU makes at mount time (hfs_btreeio.c:543).
+          sudo -E "$GITHUB_WORKSPACE/tools/stage_to_hfs.sh" \
+            "$RUNNER_TEMP/root" "$RUNNER_TEMP/iosroot.img" "$SIZE"
           df -h "$RUNNER_TEMP"
-
       - name: Make a sparse image for fastboot
         run: |
           set -euo pipefail
