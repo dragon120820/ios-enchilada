@@ -37,7 +37,10 @@ BTREE_FORKS = ((1, "extents"), (2, "catalog"), (3, "attributes"))
 
 # A B-tree needs free nodes to grow.  The v6 image shipped a catalog with 14 free
 # nodes out of 19,712 and the device could not extend it, so require a margin.
-MIN_FREE_NODES = 256
+# The floor is small on purpose: the extents tree is only 256 nodes in total, and
+# demanding 256 free ones rejected a perfectly healthy volume (build run
+# 42497170729, 2026-11-08).
+MIN_FREE_NODES = 64
 MIN_FREE_FRACTION = 0.02
 
 
