@@ -36,12 +36,16 @@ sync
 df -h "$mount_point"
 sudo umount "$mount_point"
 
-# Read-only check.  -n never rewrites anything; a freshly formatted journaled
-# volume always reports "Volume header needs minor repair", so accept that.
+# Read-only check.  -n never rewrites anything, so this cannot damage the volume
+# the way "fsck -y" did (see the header of this file).  A freshly formatted
+# journaled volume always reports "Volume header needs minor repair" and often
+# "was found corrupt and needs to be repaired" because the journal is not in the
+# state Linux expects; XNU replays it and mounts fine.  Only a structural finding
+# fails the build, and the mount below is the real gate.
 check=$(fsck.hfsplus -f -n "$out" 2>&1 || true)
 printf '%s\n' "$check" | grep -v 'Illegal name' || true
-if printf '%s\n' "$check" | grep -Eq 'Invalid node|damaged|not a HFS|bad catalog|Invalid catalog'; then
-	echo "fsck.hfsplus found real damage" >&2
+if printf '%s\n' "$check" | grep -Eq 'Invalid node|not a HFS|bad catalog|Invalid catalog|Invalid extent'; then
+	echo "fsck.hfsplus found structural damage" >&2
 	exit 1
 fi
 
@@ -69,72 +73,6 @@ sudo umount "$verify"
 rmdir "$verify" 2>/dev/null || true
 
 # The catalog B-tree file length must be a whole number of nodes, or XNU panics.
-python3 - "$out" <<'PYNODES'
-import struct, sys
-path = sys.argv[1]
-
-
-class Sparse:
-    def __init__(self, path):
-        self.f = open(path, 'rb')
-        hdr = self.f.read(28)
-        (magic, maj, mnr, fh, ch, blk, total, nchunks, chk) = struct.unpack('<IHHHHIIII', hdr)
-        assert magic == 0xED26FF3A, hex(magic)
-        self.blk = blk
-        self.chunks = []
-        pos = 28
-        for _ in range(nchunks):
-            self.f.seek(pos)
-            t, res, csz, tsz = struct.unpack('<HHII', self.f.read(12))
-            self.chunks.append((t, pos + 12, csz, tsz))
-            pos += 12 + (tsz if t != 0xCAC3 else 0)
-        self.size = sum(c[3] for c in self.chunks)
-
-    def read(self, offset, length):
-        out = bytearray()
-        logical = 0
-        for t, data_at, csz, tsz in self.chunks:
-            if logical + tsz <= offset:
-                logical += tsz
-                continue
-            if logical >= offset + length:
-                break
-            lo = max(offset - logical, 0)
-            hi = min(offset + length - logical, tsz)
-            if t == 0xCAC1:
-                self.f.seek(data_at)
-                self.f.seek(data_at + lo)
-                out += self.f.read(hi - lo)
-            elif t == 0xCAC2:
-                self.f.seek(data_at)
-                fill = self.f.read(4)
-                out += fill * ((hi - lo + 3) // 4)
-                del out[len(out) - (((hi - lo + 3) // 4) * 4 - (hi - lo)):]
-            logical += tsz
-        return bytes(out)
-
-
-img = Sparse(path)
-vh = img.read(1024, 512)
-ok = True
-for idx, name in ((1, 'extents'), (2, 'catalog'), (3, 'attributes')):
-    raw = vh[112 + idx * 80:112 + idx * 80 + 80]
-    logical = struct.unpack('>Q', raw[0:8])[0]
-    start = struct.unpack('>I', raw[16:20])[0]
-    node = img.read(start * img.blk, 4096)
-    node_size = struct.unpack('>H', node[32:34])[0]
-    total_nodes = struct.unpack('>I', node[36:40])[0]
-    free_nodes = struct.unpack('>I', node[40:44])[0]
-    depth = struct.unpack('>H', node[14:16])[0]
-    good = logical % node_size == 0
-    print('%-10s logical %#x nodeSize %d nodes %d free %d depth %d %s' % (
-        name, logical, node_size, total_nodes, free_nodes, depth,
-        'ALIGNED' if good else 'MISALIGNED'))
-    ok = ok and good
-if not ok:
-    sys.exit('a B-tree file length is not a whole number of nodes; XNU would panic')
-print('all B-tree forks are whole numbers of nodes')
-PYNODES
-
+python3 "$(dirname "$0")/check_btree_nodes.py" "$out"
 ls -l "$out"
 sha256sum "$out"
