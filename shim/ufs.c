@@ -188,7 +188,7 @@ static const char *fs_type(uint32_t lba)
  * first lines of the ring are the start of the boot: kernel init, then the
  * launchd exec lines in the order they happened. Print those verbatim.
  */
-#define HEAD_LINES	16
+#define HEAD_LINES	6
 
 static void print_head(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
 {
@@ -262,7 +262,7 @@ static int has_needle(const char *s)
  * -fno-pic a pointer array emits an ABS64 relocation per element and the CI
  * guard rejects the object.
  */
-#define FILTER_LINES	24
+#define FILTER_LINES	10
 #define FILTER_COLS	(LINE_MAX + 1)
 
 static char recent[FILTER_LINES][FILTER_COLS];
@@ -386,13 +386,13 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 		con_line(hid_panel_line);
 	else
 		con_str("SWEETLOG", "no SWEET HID: panel line in the ring");
-	con_str("SWEETLOG", "last lines that name a failure:");
-	recent_print();
 	con_str("SWEETLOG", "last lines written, no filter:");
 	for (int k = 0; k < tail_n; k++) {
 		int idx = (tail_at - tail_n + k + FILTER_LINES * 2) % FILTER_LINES;
 		con_line(tail_lines[idx]);
 	}
+	con_str("SWEETLOG", "last lines that name a failure:");
+	recent_print();
 }
 
 static void dump_sweetlog(uint32_t first, uint32_t nblocks)
