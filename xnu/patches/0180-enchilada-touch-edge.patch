@@ -1,0 +1,43 @@
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -368,6 +368,7 @@
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fPanelW, fPanelH;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -445,6 +446,10 @@
+ 	fLogicalH = native ? panelH : 2436;
+ 	fOffX = (fLogicalW - panelW) / 2;
+ 	fOffY = (fLogicalH - panelH) / 2;
++	fPanelW = panelW;
++	fPanelH = panelH;
++	IOLog("SWEET HID: panel %dx%d logical %dx%d offset %d,%d edge %d\n",
++	    fPanelW, fPanelH, fLogicalW, fLogicalH, fOffX, fOffY, SWEET_TOUCH_EDGE_PX);
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -466,8 +471,8 @@
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > fPanelW - 1 ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y > fPanelH - 1 ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -480,8 +485,8 @@
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > fPanelW - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > fPanelH - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
