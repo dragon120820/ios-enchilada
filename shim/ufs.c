@@ -268,6 +268,12 @@ static int has_needle(const char *s)
 static char recent[FILTER_LINES][FILTER_COLS];
 static int recent_at, recent_n;
 
+/* The geometry line prints once, early, so it has scrolled out of the
+ * recent history by the time the ring is full. Keep a copy of the
+ * first one seen instead. */
+static char hid_panel_line[FILTER_COLS];
+static int have_hid_panel;
+
 static void recent_reset(void)
 {
 	recent_at = 0;
@@ -333,6 +339,17 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 			char c = (char)logwin[i];
 			if (c == '\n') {
 				cur[n] = 0;
+				if (n && !have_hid_panel && contains(cur, "SWEET HID: panel")) {
+					int k = 0;
+					if (n >= LINE_MAX)
+						n = LINE_MAX;
+					while (k < n) {
+						hid_panel_line[k] = cur[k];
+						k++;
+					}
+					hid_panel_line[k] = 0;
+					have_hid_panel = 1;
+				}
 				if (n && has_needle(cur)) {
 					recent_add(cur);
 					matched++;
@@ -347,6 +364,10 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 	}
 
 	con_hex("SWEETLOG matched", (uint64_t)matched);
+	if (have_hid_panel)
+		con_line(hid_panel_line);
+	else
+		con_str("SWEETLOG", "no SWEET HID: panel line in the ring");
 	con_str("SWEETLOG", "last lines that name a failure:");
 	recent_print();
 }
