@@ -4,8 +4,11 @@ jobs:
   m15:
     runs-on: macos-15
     steps:
-      - run: xcodebuild -version; ls /Applications | grep -i xcode; xcrun --find iig 2>&1 | head -2
-  m26:
-    runs-on: macos-26
-    steps:
-      - run: xcodebuild -version; ls /Applications | grep -i xcode; xcrun --find iig 2>&1 | head -2
+      - run: |
+          { xcodebuild -version; ls /Applications | grep -i xcode;
+            xcrun --find iig; xcode-select -p; sw_vers; } > probe.txt 2>&1
+          cat probe.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe
+          path: probe.txt
