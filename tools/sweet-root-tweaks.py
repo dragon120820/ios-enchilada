@@ -67,8 +67,25 @@ def launchd(root):
     removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
     for k in removed:
         del jobs[k]
+    # A job whose stdout/stderr is /dev/console cannot be spawned: xpcproxy
+    # exits 78 (EX_CONFIG) because /dev/console is not openable for the mobile
+    # user, and launchd just tries again.  That is the bare `exec xpcproxy`
+    # loop that never reaches backboardd.  NOTES.md records the same finding
+    # for v8 ("posix_spawn(/usr/libexec/backboardd), error 0xd - Permission
+    # denied (xpcproxy exit 78) - /dev/console not openable") and the images
+    # from v9 on rename the keys in place; an unknown key costs nothing, so
+    # the rename is idempotent.  Daemon output still reaches the log through
+    # patch 0048, which tees /dev/console.
+    quiet = 0
+    for job in jobs.values():
+        for key in ('StandardOutPath', 'StandardErrorPath'):
+            if key in job:
+                job[key + 'X'] = job.pop(key)
+                quiet += 1
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, '
+          f'{len(removed)} CommCenter jobs removed, '
+          f'{quiet} stdout/stderr keys pointed away from /dev/console')
 
 
 # Daemons that crash-loop on a bring-up kernel because a facility is missing:
