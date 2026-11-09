@@ -1,0 +1,38 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -89,6 +89,24 @@
+ #define SWEET_FB_VSYNC_US               16667
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
++ * sweetfb_stayon=1 makes the panel ignore backboardd's RequestPowerChange(0).
++ * 0079 gave the driver a real off state, but on this unit the power key does
++ * not bring the panel back (PLAN-ENCHILADA.md §3.3 I2), so auto-lock would end
++ * a test session in a black screen with no way out.  Default off keeps the
++ * daily-use behaviour.
++ */
++static int sweet_fb_stayon(void)
++{
++	static int on = -1;
++
++	if (on < 0) {
++		on = 0;
++		(void)PE_parse_boot_argn("sweetfb_stayon", &on, sizeof(on));
++	}
++	return on != 0;
++}
++
++/*
+  * The iOS userland only has status bar / layout data for real iPhone
+  * screens (UIKit: "No status bar visual provider for screen", the red
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+@@ -623,6 +641,10 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			if (off && sweet_fb_stayon()) {
++				IOLog("SWEET FB: display off ignored (sweetfb_stayon)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
