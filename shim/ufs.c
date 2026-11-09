@@ -284,7 +284,7 @@ static int tail_at, tail_n;
  * A shell crash is printed once and then buried by the exec storm that
  * follows, so the crash and sampler lines get a history of their own.
  */
-#define DIAG_LINES	14
+#define DIAG_LINES	16
 static char diag_lines[DIAG_LINES][FILTER_COLS];
 static int diag_at, diag_n;
 
@@ -315,6 +315,72 @@ static void recent_print(void)
 		int idx = (recent_at - recent_n + k + FILTER_LINES * 2) % FILTER_LINES;
 		con_line(recent[idx]);
 	}
+}
+
+/*
+ * A process that crashes in a loop must not fill the history: after
+ * DIAG_PER_NAME lines from one name, the rest are dropped, so the crash
+ * that matters is still in the ring when it is read.
+ */
+#define DIAG_PER_NAME	3
+#define DIAG_NAMES	24
+#define DIAG_NAME_MAX	23
+
+static char diag_names[DIAG_NAMES][DIAG_NAME_MAX + 1];
+static int diag_counts[DIAG_NAMES];
+static int diag_used;
+
+static int same_name(const char *a, const char *b)
+{
+	int k = 0;
+
+	while (a[k] && b[k]) {
+		if (a[k] != b[k])
+			return 0;
+		k++;
+	}
+	return a[k] == b[k];
+}
+
+/* Returns nonzero when another line from this process may be recorded. */
+static int diag_allow(const char *line)
+{
+	char name[DIAG_NAME_MAX + 1];
+	const char *p = line;
+	int k = 0;
+	int slot = -1;
+
+	while (*p && *p != ' ')
+		p++;			/* CRASH / STR / SMP */
+	while (*p == ' ')
+		p++;
+	while (p[k] && p[k] != ' ' && p[k] != '[' && k < DIAG_NAME_MAX) {
+		name[k] = p[k];
+		k++;
+	}
+	name[k] = 0;
+	if (!k)
+		return 1;
+
+	for (int i = 0; i < diag_used; i++)
+		if (same_name(diag_names[i], name)) {
+			slot = i;
+			break;
+		}
+	if (slot < 0) {
+		if (diag_used >= DIAG_NAMES)
+			return 0;	/* unknown name, table full: drop it */
+		slot = diag_used++;
+		for (k = 0; k < DIAG_NAME_MAX + 1; k++)
+			diag_names[slot][k] = 0;
+		for (k = 0; name[k]; k++)
+			diag_names[slot][k] = name[k];
+		diag_counts[slot] = 0;
+	}
+	if (diag_counts[slot] >= DIAG_PER_NAME)
+		return 0;
+	diag_counts[slot]++;
+	return 1;
 }
 
 static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t total)
@@ -383,16 +449,18 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 				if (n && (contains(cur, "CRASH ")
 						|| contains(cur, "STR ")
 						|| contains(cur, "SMP "))) {
-					char *row = diag_lines[diag_at];
-					int k = 0;
-					while (k < n && k < LINE_MAX) {
-						row[k] = cur[k];
-						k++;
+					if (diag_allow(cur)) {
+						char *row = diag_lines[diag_at];
+						int k = 0;
+						while (k < n && k < LINE_MAX) {
+							row[k] = cur[k];
+							k++;
+						}
+						row[k] = 0;
+						diag_at = (diag_at + 1) % DIAG_LINES;
+						if (diag_n < DIAG_LINES)
+							diag_n++;
 					}
-					row[k] = 0;
-					diag_at = (diag_at + 1) % DIAG_LINES;
-					if (diag_n < DIAG_LINES)
-						diag_n++;
 				}
 				n = 0;
 				continue;
