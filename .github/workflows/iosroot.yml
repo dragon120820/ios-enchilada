@@ -22,6 +22,10 @@ on:
         description: "size of each uploaded part in MiB"
         required: false
         default: "1800"
+      tweak_mode:
+        description: "which crash-loop tweaks to apply: none, throttle, disable, both"
+        required: false
+        default: "none"
 
 jobs:
   root:
@@ -114,7 +118,19 @@ jobs:
           # images reach the home screen (launchd _PanicOnCrasX, no CommCenter,
           # containers, migration stamp, VirtualAudio/StartRecorderServer off,
           # SpringBoard/BKNoWatchdogs, Setup skipped, activation ark).
-          sudo SWEET_TWEAK_THROTTLE=0 SWEET_TWEAK_DISABLE=0 \
+          # tweak_mode picks which of the two optional passes run.  Both are
+          # off by default: the v8 image reached the lock screen with neither,
+          # and v7 stopped before SpringBoard with both.  The pair is exposed
+          # as an input so a bisect does not have to edit this file.
+          case "${{ inputs.tweak_mode }}" in
+            none)    th=0; di=0 ;;
+            throttle) th=1; di=0 ;;
+            disable) th=0; di=1 ;;
+            both)    th=1; di=1 ;;
+            *) echo "tweak_mode must be none, throttle, disable or both"; exit 1 ;;
+          esac
+          echo "tweak_mode=${{ inputs.tweak_mode }} throttle=$th disable=$di"
+          sudo SWEET_TWEAK_THROTTLE=$th SWEET_TWEAK_DISABLE=$di \
             python3 "$ws/tools/sweet-root-tweaks.py" "$RUNNER_TEMP/root"
           sudo python3 - "$RUNNER_TEMP/root" <<'PYSTAGE'
           import plistlib, sys
