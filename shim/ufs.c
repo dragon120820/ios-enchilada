@@ -188,7 +188,7 @@ static const char *fs_type(uint32_t lba)
  * first lines of the ring are the start of the boot: kernel init, then the
  * launchd exec lines in the order they happened. Print those verbatim.
  */
-#define HEAD_LINES	6
+#define HEAD_LINES	4
 
 static void print_head(uint32_t ring_base, uint32_t rsize, uint64_t total, int want)
 {
@@ -279,6 +279,14 @@ static int have_hid_panel;
  * that is usually not an error. */
 static char tail_lines[FILTER_LINES][FILTER_COLS];
 static int tail_at, tail_n;
+
+/*
+ * A shell crash is printed once and then buried by the exec storm that
+ * follows, so the crash and sampler lines get a history of their own.
+ */
+#define DIAG_LINES	14
+static char diag_lines[DIAG_LINES][FILTER_COLS];
+static int diag_at, diag_n;
 
 static void recent_reset(void)
 {
@@ -372,6 +380,20 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 					recent_add(cur);
 					matched++;
 				}
+				if (n && (contains(cur, "CRASH ")
+						|| contains(cur, "STR ")
+						|| contains(cur, "SMP "))) {
+					char *row = diag_lines[diag_at];
+					int k = 0;
+					while (k < n && k < LINE_MAX) {
+						row[k] = cur[k];
+						k++;
+					}
+					row[k] = 0;
+					diag_at = (diag_at + 1) % DIAG_LINES;
+					if (diag_n < DIAG_LINES)
+						diag_n++;
+				}
 				n = 0;
 				continue;
 			}
@@ -393,6 +415,11 @@ static void print_recent_failures(uint32_t ring_base, uint32_t rsize, uint64_t t
 	}
 	con_str("SWEETLOG", "last lines that name a failure:");
 	recent_print();
+	con_str("SWEETLOG", "last lines that name a crash or a sample:");
+	for (int k = 0; k < diag_n; k++) {
+		int idx = (diag_at - diag_n + k + DIAG_LINES * 2) % DIAG_LINES;
+		con_line(diag_lines[idx]);
+	}
 }
 
 static void dump_sweetlog(uint32_t first, uint32_t nblocks)
