@@ -1,0 +1,94 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -89,6 +89,32 @@
+ #define SWEET_FB_VSYNC_US               16667
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
++ * sweetfb_beat=1 paints a bar along the bottom edge from the vsync timer.
++ * A boot that stops at the Apple logo otherwise looks identical whether the
++ * kernel died or the window server simply never drew; a bar that advances
++ * once a second tells the two apart from one photograph.  Default off, so a
++ * build without the boot-arg behaves exactly as before.
++ */
++static int sweet_fb_beat(void)
++{
++	static int on = -1;
++
++	if (on < 0) {
++		on = 0;
++		(void)PE_parse_boot_argn("sweetfb_beat", &on, sizeof(on));
++	}
++	return on != 0;
++}
++
++#define SWEET_FB_BEAT_ROWS      12
++#define SWEET_FB_BEAT_STEPS     8
++
++static const uint32_t sweet_fb_beat_colors[SWEET_FB_BEAT_STEPS] = {
++	0x00ffffff, 0x0000ffff, 0x0000ff00, 0x000000ff,
++	0x00ffff00, 0x00ff00ff, 0x0000ffff, 0x00ffffff,
++};
++
++/*
+  * sweetfb_stayon=1 makes the panel ignore backboardd's RequestPowerChange(0).
+  * 0079 gave the driver a real off state, but on this unit the power key does
+  * not bring the panel back (PLAN-ENCHILADA.md §3.3 I2), so auto-lock would end
+@@ -284,12 +310,38 @@
+ 	return true;
+ }
+ 
++/*
++ * Eight blocks across the bottom edge, filled left to right and wrapping every
++ * second: one photograph then shows both that the timer runs and roughly how
++ * long the boot has been sitting there.
++ */
++static void
++sweet_fb_paint_beat(AppleCLCD *fb, uint64_t tick)
++{
++	if (fb->fPixels == 0 || fb->fWidth == 0 || fb->fHeight < SWEET_FB_BEAT_ROWS) {
++		return;
++	}
++	uint64_t step = tick / 60;                  /* ~1 s at the 16.67 ms tick */
++	uint32_t color = sweet_fb_beat_colors[step % SWEET_FB_BEAT_STEPS];
++	uint32_t blocks = (uint32_t)(step % (SWEET_FB_BEAT_STEPS + 1));
++	uint32_t width = fb->fWidth;
++	uint32_t cut = (uint32_t)(((uint64_t)blocks * width) / SWEET_FB_BEAT_STEPS);
++
++	for (uint32_t y = fb->fHeight - SWEET_FB_BEAT_ROWS; y < fb->fHeight; y++) {
++		volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
++		for (uint32_t x = 0; x < width; x++) {
++			row[x] = (x < cut) ? color : 0x00000000;
++		}
++	}
++}
++
+ void
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	int beat = sweet_fb_beat();
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+@@ -330,6 +382,9 @@
+ 				}
+ 			}
+ 		}
++		if (beat) {
++			sweet_fb_paint_beat(fb, count);
++		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+@@ -346,6 +401,9 @@
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++	}
++	if (beat) {
++		sweet_fb_paint_beat(fb, count);
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
