@@ -1,7 +1,7 @@
 diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -701,6 +701,207 @@
+@@ -701,6 +701,222 @@
  /*****************************************************************************/
  
  /*
@@ -66,6 +66,7 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +
 +static volatile uint32_t *geni_base;
 +static int geni_dead;
++static int geni_registered;
 +
 +static inline uint32_t
 +geni_rd(uint32_t off)
@@ -82,8 +83,14 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +static void
 +geni_uart_init(void)
 +{
-+	uint32_t proto;
 +	uint32_t i;
++
++	/* serial_init() walks the whole backend list and calls init() again on
++	 * every re-entry, so this has to be idempotent and silent: printing
++	 * here is exactly what made one line repeat down the console. */
++	if (geni_base == NULL || geni_dead) {
++		return;
++	}
 +
 +	/* A command left in flight by the bootloader would swallow our first
 +	 * transfer, so retire it before touching anything else. */
@@ -109,26 +116,13 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +	geni_wr(SE_GENI_TX_WATERMARK_REG, DEF_TX_WM);
 +	geni_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
 +
-+	proto = (geni_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT;
-+	if (proto != GENI_SE_UART_PROTO) {
-+		/* No UART firmware in this engine: writes to the TX FIFO would
-+		 * never drain.  Leave it alone and report what we saw. */
-+		printf("SWEET UART: engine at 0x%lx has protocol %u, not UART (%u); "
-+		    "no firmware, console not registered\n",
-+		    (unsigned long)SWEET_UART_PHYS, (unsigned int)proto,
-+		    (unsigned int)GENI_SE_UART_PROTO);
-+		return;
-+	}
-+
 +	/* Mask CTS: with the pin asserted and nothing to deassert it, waiting
 +	 * for clear-to-send stalls the first character forever. */
 +	geni_wr(SE_UART_TX_TRANS_CFG, geni_rd(SE_UART_TX_TRANS_CFG) | UART_CTS_MASK);
-+
-+	register_serial_functions(&sweet_geni_uart_serial_functions);
-+	printf("SWEET UART: console at 0x%lx, GENI UART firmware present\n",
-+	    (unsigned long)SWEET_UART_PHYS);
 +}
 +
++static unsigned int
++geni_uart_transmit_ready(void)
 +static unsigned int
 +geni_uart_transmit_ready(void)
 +{
@@ -182,7 +176,12 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +	DTEntry entry;
 +	uint64_t const *reg;
 +	unsigned int size;
++	uint32_t proto;
 +	uint32_t enable = 1;
++
++	if (geni_registered) {
++		return;
++	}
 +
 +	/* sweetuart=0 keeps the console off without rebuilding the kernel. */
 +	PE_parse_boot_argn("sweetuart", &enable, sizeof(enable));
@@ -199,7 +198,23 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +	if (geni_base == NULL) {
 +		return;
 +	}
++
++	proto = (geni_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT;
++	if (proto != GENI_SE_UART_PROTO) {
++		/* No UART firmware in this engine: writes to the TX FIFO would
++		 * never drain.  Leave it alone and report what we saw. */
++		printf("SWEET UART: engine at 0x%lx has protocol %u, not UART (%u); "
++		    "no firmware, console not registered\n",
++		    (unsigned long)SWEET_UART_PHYS, (unsigned int)proto,
++		    (unsigned int)GENI_SE_UART_PROTO);
++		return;
++	}
++
 +	geni_uart_init();
++	geni_registered = 1;
++	register_serial_functions(&sweet_geni_uart_serial_functions);
++	printf("SWEET UART: console at 0x%lx, GENI UART firmware present\n",
++	    (unsigned long)SWEET_UART_PHYS);
 +}
 +
 +
@@ -209,7 +224,7 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
   * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
   * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
   * the boot framebuffer described by the ADT node "sweet-fbcon":
-@@ -923,6 +1124,8 @@
+@@ -923,6 +1139,8 @@
  	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
  
  	fbcon_probe();
