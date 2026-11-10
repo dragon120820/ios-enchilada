@@ -1,7 +1,7 @@
 diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -701,6 +701,222 @@
+@@ -701,6 +701,220 @@
  /*****************************************************************************/
  
  /*
@@ -123,8 +123,6 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 +
 +static unsigned int
 +geni_uart_transmit_ready(void)
-+static unsigned int
-+geni_uart_transmit_ready(void)
 +{
 +	/* Always "ready": uart_putc_options_ spins on this until it returns
 +	 * true, so reporting a dead engine here would hang the console instead
@@ -224,7 +222,7 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
   * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
   * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
   * the boot framebuffer described by the ADT node "sweet-fbcon":
-@@ -923,6 +1139,8 @@
+@@ -923,6 +1137,8 @@
  	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
  
  	fbcon_probe();
