@@ -1,0 +1,233 @@
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -701,6 +701,207 @@
+ /*****************************************************************************/
+ 
+ /*
++ * QUP serial engine console.  This is the debug UART the bootloader logs to,
++ * so it is the only serial port on this board whose wiring we know for a fact:
++ * the live device tree describes it as "qcom,msm-geni-console-oem" at
++ * 0xa84000 with GIC SPI 354, and the vendor dtbo turns it on (fragment@34 for
++ * status, fragment@60 for the -oem compatible string).
++ *
++ * Register names are the ones in include/linux/soc/qcom/geni-se.h and
++ * drivers/tty/serial/qcom_geni_serial.c; the offsets are relative to the SE
++ * base, not the QUP wrapper.
++ */
++#define SWEET_UART_PHYS                 0xa84000ul
++#define SWEET_UART_SIZE                 0x4000ul
++
++#define GENI_FORCE_DEFAULT_REG          0x020u
++#define SE_GENI_STATUS                  0x040u
++#define GENI_IF_DISABLE_RO              0x064u
++#define GENI_FW_REVISION_RO             0x068u
++#define SE_GENI_DMA_MODE_EN             0x258u
++#define SE_UART_TX_TRANS_CFG            0x25cu
++#define SE_UART_TX_TRANS_LEN            0x270u
++#define SE_GENI_M_CMD0                  0x600u
++#define SE_GENI_M_CMD_CTRL_REG          0x604u
++#define SE_GENI_M_IRQ_STATUS            0x610u
++#define SE_GENI_M_IRQ_CLEAR             0x618u
++#define SE_GENI_TX_FIFOn                0x700u
++#define SE_GENI_TX_WATERMARK_REG        0x80cu
++
++#define FW_REV_PROTOCOL_MSK             0xff00u
++#define FW_REV_PROTOCOL_SHFT            8
++#define GENI_SE_UART_PROTO              2u      /* enum geni_se_protocol_type */
++#define GENI_SE_XFER_FIFO               0u
++
++#define UART_CTS_MASK                   (1u << 1)
++#define UART_START_TX                   0x1u    /* UART M_CMD opcode */
++#define M_OPCODE_SHFT                   27
++#define M_CMD_DONE_EN                   (1u << 0)
++#define M_CMD_ACTIVE                    (1u << 0)
++#define M_GENI_CMD_ABORT                (1u << 1)
++#define M_CMD_ABORT_EN                  (1u << 2)
++#define GENI_DMA_MODE_EN                (1u << 0)
++#define DEF_TX_WM                       2u
++#define GENI_SPIN                       200000u
++
++static void geni_uart_init(void);
++static unsigned int geni_uart_transmit_ready(void);
++static void geni_uart_transmit_data(uint8_t c);
++static unsigned int geni_uart_receive_ready(void);
++static uint8_t geni_uart_receive_data(void);
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) sweet_geni_uart_serial_functions =
++{
++	.init = geni_uart_init,
++	.transmit_ready = geni_uart_transmit_ready,
++	.transmit_data = geni_uart_transmit_data,
++	.receive_ready = geni_uart_receive_ready,
++	.receive_data = geni_uart_receive_data,
++	.device = SERIAL_SWEET_GENI_UART
++};
++
++static volatile uint32_t *geni_base;
++static int geni_dead;
++
++static inline uint32_t
++geni_rd(uint32_t off)
++{
++	return geni_base[off / 4];
++}
++
++static inline void
++geni_wr(uint32_t off, uint32_t val)
++{
++	geni_base[off / 4] = val;
++}
++
++static void
++geni_uart_init(void)
++{
++	uint32_t proto;
++	uint32_t i;
++
++	/* A command left in flight by the bootloader would swallow our first
++	 * transfer, so retire it before touching anything else. */
++	if ((geni_rd(SE_GENI_STATUS) & M_CMD_ACTIVE) != 0) {
++		geni_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_ABORT);
++		for (i = 0; i < GENI_SPIN; i++) {
++			if ((geni_rd(SE_GENI_M_IRQ_STATUS) & M_CMD_ABORT_EN) != 0) {
++				break;
++			}
++		}
++		geni_wr(SE_GENI_M_IRQ_CLEAR, M_CMD_ABORT_EN);
++	}
++
++	/* Some BOM configurations strap the SE off; the force-default bit is
++	 * the documented way back.  Reads as 0 on this board. */
++	if ((geni_rd(GENI_IF_DISABLE_RO) & 0x1u) != 0) {
++		geni_wr(GENI_FORCE_DEFAULT_REG, 0x1u);
++	}
++
++	/* FIFO mode: DMA needs the SMMU context banks, which we do not program
++	 * (the wrapper carries qcom,iommu-s1-bypass, so FIFO needs no IOMMU). */
++	geni_wr(SE_GENI_DMA_MODE_EN, geni_rd(SE_GENI_DMA_MODE_EN) & ~GENI_DMA_MODE_EN);
++	geni_wr(SE_GENI_TX_WATERMARK_REG, DEF_TX_WM);
++	geni_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++
++	proto = (geni_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT;
++	if (proto != GENI_SE_UART_PROTO) {
++		/* No UART firmware in this engine: writes to the TX FIFO would
++		 * never drain.  Leave it alone and report what we saw. */
++		printf("SWEET UART: engine at 0x%lx has protocol %u, not UART (%u); "
++		    "no firmware, console not registered\n",
++		    (unsigned long)SWEET_UART_PHYS, (unsigned int)proto,
++		    (unsigned int)GENI_SE_UART_PROTO);
++		return;
++	}
++
++	/* Mask CTS: with the pin asserted and nothing to deassert it, waiting
++	 * for clear-to-send stalls the first character forever. */
++	geni_wr(SE_UART_TX_TRANS_CFG, geni_rd(SE_UART_TX_TRANS_CFG) | UART_CTS_MASK);
++
++	register_serial_functions(&sweet_geni_uart_serial_functions);
++	printf("SWEET UART: console at 0x%lx, GENI UART firmware present\n",
++	    (unsigned long)SWEET_UART_PHYS);
++}
++
++static unsigned int
++geni_uart_transmit_ready(void)
++{
++	/* Always "ready": uart_putc_options_ spins on this until it returns
++	 * true, so reporting a dead engine here would hang the console instead
++	 * of dropping the character.  geni_uart_transmit_data() does the drop. */
++	return 1;
++}
++
++static void
++geni_uart_transmit_data(uint8_t c)
++{
++	uint32_t i;
++
++	if (geni_base == NULL || geni_dead) {
++		return;
++	}
++
++	geni_wr(SE_GENI_M_IRQ_CLEAR, M_CMD_DONE_EN);
++	geni_wr(SE_UART_TX_TRANS_LEN, 1);
++	geni_wr(SE_GENI_M_CMD0, UART_START_TX << M_OPCODE_SHFT);
++	geni_wr(SE_GENI_TX_FIFOn, c);
++
++	for (i = 0; i < GENI_SPIN; i++) {
++		if ((geni_rd(SE_GENI_M_IRQ_STATUS) & M_CMD_DONE_EN) != 0) {
++			return;
++		}
++	}
++
++	/* The engine stopped advancing.  Dropping the rest of the console is
++	 * the only failure mode that cannot wedge the boot. */
++	geni_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_ABORT);
++	geni_dead = 1;
++}
++
++static unsigned int
++geni_uart_receive_ready(void)
++{
++	return 0;
++}
++
++static uint8_t
++geni_uart_receive_data(void)
++{
++	return 0;
++}
++
++static void
++geni_uart_probe(void)
++{
++	DTEntry entry;
++	uint64_t const *reg;
++	unsigned int size;
++	uint32_t enable = 1;
++
++	/* sweetuart=0 keeps the console off without rebuilding the kernel. */
++	PE_parse_boot_argn("sweetuart", &enable, sizeof(enable));
++	if (enable == 0) {
++		return;
++	}
++
++	if (SecureDTFindEntry("name", "sweet-geni-uart", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
++		return;
++	}
++
++	geni_base = (volatile uint32_t *)ml_io_map(reg[0], reg[1]);
++	if (geni_base == NULL) {
++		return;
++	}
++	geni_uart_init();
++}
++
++
++/*****************************************************************************/
++
++/*
+  * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
+  * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
+  * the boot framebuffer described by the ADT node "sweet-fbcon":
+@@ -923,6 +1124,8 @@
+ 	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
+ 
+ 	fbcon_probe();
++
++	geni_uart_probe();
+ 
+ #ifdef PI3_UART
+ 	if (SecureDTFindEntry("name", "gpio", &entryP) == kSuccess) {
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -48,7 +48,8 @@
+ 	SERIAL_PI3_UART=0x4,
+ 	SERIAL_VMAPPLE_UART=0x8,
+ 	SERIAL_DCC_UART=0x10,
+-	SERIAL_SWEET_FBCON=0x20
++	SERIAL_SWEET_FBCON=0x20,
++	SERIAL_SWEET_GENI_UART=0x40
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);

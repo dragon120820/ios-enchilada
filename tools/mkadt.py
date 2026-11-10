@@ -37,6 +37,9 @@ SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2340, 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
+# qupv3_1_geni_se SE1, the debug console (WRAP1, not WRAP0: the wrapper block
+# is at 0xac0000, i.e. AFTER the engine, so SE addresses are not derivable).
+GENI_UART, GENI_UART_SIZE = 0x00a84000, 0x4000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -286,6 +289,18 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
         ('stride', u32(FB_STRIDE)),
     ])
 
+    # pexpert/arm/pe_serial.c: the QUP serial engine the bootloader logs to.
+    # 0xa84000 is qupv3_1_geni_se SE1 in the live FDT of this unit, where the
+    # vendor dtbo turns it on (fragment@34) and renames its compatible string
+    # to "qcom,msm-geni-console-oem" (fragment@60).  GIC SPI 354 is not used:
+    # the console polls SE_GENI_M_IRQ_STATUS instead of taking an interrupt,
+    # because an interrupt-driven console dies the moment the GIC is not yet
+    # delivering to pexpert.
+    uart = node('sweet-geni-uart', [
+        ph(),
+        ('reg', u64(GENI_UART, GENI_UART_SIZE)),
+    ])
+
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
@@ -326,7 +341,7 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + pram + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, uart, buttons] + product + pram + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':
